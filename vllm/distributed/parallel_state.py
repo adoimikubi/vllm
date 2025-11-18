@@ -1001,6 +1001,11 @@ def init_model_parallel_group(
 
 _TP: Optional[GroupCoordinator] = None
 
+_MTP = 0
+
+def set_mtp(mtp: int):
+    global _MTP
+    _MTP = mtp
 
 def get_tp_group() -> GroupCoordinator:
     assert _TP is not None, ("tensor model parallel group is not initialized")
@@ -1361,11 +1366,15 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
 
 
 def get_tensor_model_parallel_world_size():
+    if _MTP != 0:
+        return _MTP
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
 
 def get_tensor_model_parallel_rank():
+    if _MTP != 0:
+        return 0
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 

@@ -36,7 +36,7 @@ from vllm.attention import Attention
 from vllm.forward_context import get_forward_context
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (get_ep_group, get_pp_group,
+from vllm.distributed import (get_ep_group, get_pp_group, set_mtp,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
@@ -84,9 +84,10 @@ class DeepseekV2MLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel=False,
         prefix: str = "",
+        is_share: bool = False,
     ) -> None:
         super().__init__()
-
+        self.is_share = is_share
         # If is_sequence_parallel, the input and output tensors are sharded
         # across the ranks within the tp_group. In this case the weights are
         # replicated and no collective ops are needed.
@@ -96,23 +97,37 @@ class DeepseekV2MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             disable_tp=is_sequence_parallel,
-            prefix=f"{prefix}.gate_up_proj")
+            prefix=f"{prefix}.gate_up_proj",
+            is_share=is_share,)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
                                            quant_config=quant_config,
                                            reduce_results=reduce_results,
                                            disable_tp=is_sequence_parallel,
-                                           prefix=f"{prefix}.down_proj")
+                                           prefix=f"{prefix}.down_proj", 
+                                           is_share=is_share,)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        # if self.is_share:
+        #     print("hiddenstates: \n")
+        #     print(x)
         gate_up, _ = self.gate_up_proj(x)
+        # if self.is_share:
+        #     print("gate_up_proj: \n")
+        #     print(gate_up)
         x = self.act_fn(gate_up)
+        # if self.is_share:
+        #     print("act_fn: \n")
+        #     print(x)
         x, _ = self.down_proj(x)
+        # if self.is_share:
+        #     print("down_proj: \n")
+        #     print(x)
         return x
 
 
@@ -125,7 +140,10 @@ class DeepseekV2MoE(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
+        rank = get_tensor_model_parallel_rank()
+        
         super().__init__()
+        
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
@@ -199,6 +217,7 @@ class DeepseekV2MoE(nn.Module):
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
 
+            set_mtp(1)
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -207,7 +226,9 @@ class DeepseekV2MoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                is_share = True,
             )
+            set_mtp(0)
 
             self.experts = SharedFusedMoE(
                 shared_experts=self.shared_experts,
@@ -292,10 +313,15 @@ class DeepseekV2MoE(nn.Module):
         row_idx: Optional[torch.Tensor] = None,
         ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
+        # print(f'num tokens start afd forward {num_tokens}')
         # if self.afd_config is not None:
         #     is_m2n = self.afd_config.afd_connector == "m2nconnector"
         # else:
         #     is_m2n = False
+
+        set_mtp(1)
+        # print("hidden_states in\n")
+        # print(hidden_states)
         is_m2n = False
         # TODO(yxj ):dynamic_scales --> dynamic_scale
         if is_m2n:
@@ -320,6 +346,11 @@ class DeepseekV2MoE(nn.Module):
             shared_output = None
             final_hidden_states = fused_moe_out
 
+        # print("final hidden states\n")
+        # print(final_hidden_states)
+        # print("shared_output\n")
+        # print(shared_output)
+
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
@@ -341,6 +372,8 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))
 
+        set_mtp(0)
+        # print(f'num tokens end afd forward {num_tokens}')
         return final_hidden_states.view(num_tokens, hidden_dim)
         
     
@@ -774,12 +807,20 @@ class DeepseekV2DecoderLayer(nn.Module):
                         if forward_ctx is not None else None)
         afd_connector = (afd_metadata.afd_connector
                          if afd_metadata is not None else None)
+        
+        # print("before input_layernorm!!!!!!!!!!!!!!!!!!!")
+        # print(hidden_states)
+
         if residual is None:
             residual = hidden_states.clone()
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
+        # print("before self_attn!!!!!!!!!!!!!!!!!!!")
+        # print(hidden_states)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -794,10 +835,17 @@ class DeepseekV2DecoderLayer(nn.Module):
                 # The residual is shared by all layers, we only scale it on
                 # first layer.
                 residual *= 1. / self.routed_scaling_factor
+        
+        # print("after self_attn!!!!!!!!!!!!!!!!!!!")
+        # print(hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+
+        # print("after layernorm!!!!!!!!!!!!!!!!!!!")
+        # print(hidden_states)
+
         # print(f'attn decode layer is {self.layer_idx}')
         if self.role is not None and self.layer_idx >= self.first_k_dense_replace:
             # --------- ffn need data
@@ -822,16 +870,16 @@ class DeepseekV2DecoderLayer(nn.Module):
                 use_grouped_topk=False,
                 renormalize=True,
                 )
-            print(f'topk_weights dtype is {topk_weights.dtype}')
+            # print(f'topk_weights dtype is {topk_weights.dtype}')
             topk_weights = topk_weights.to(torch.float)
-            print(f'topk_weights after dtype is {topk_weights.dtype}')
-            print(f'hidden_states shape dtype is {hidden_states.shape}')
+            # print(f'topk_weights after dtype is {topk_weights.dtype}')
+            # print(f'hidden_states shape dtype is {hidden_states.shape}')
             is_m2n = False
             # if self.afd_config is not None:
             #     is_m2n = self.afd_config.afd_connector == "m2nconnector"
             # else:
             #     is_m2n = False
-            is_cam = True
+            is_cam = False
             if is_m2n:
                 m2n_afdconnector_data = M2NAFDConnectorMetadata() 
                 m2n_afdconnector_data.moe_expert_num = 64

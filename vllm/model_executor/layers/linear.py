@@ -612,7 +612,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        is_share: bool = False,
     ):
+        self.is_share = is_share
         self.output_sizes = output_sizes
         self.tp_size = (get_tensor_model_parallel_world_size()
                         if not disable_tp else 1)
@@ -637,6 +639,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
 
+        # if self.is_share:
+        #     self.tp_rank = get_tensor_model_parallel_rank()
+        #     self.tp_size = get_tensor_model_parallel_world_size()
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
@@ -770,6 +775,34 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+        # if self.is_share:
+        #     print("loaded_weight\n")
+        #     print(loaded_weight)
+        #     print("loaded_shard_id\n")
+        #     print(loaded_shard_id)
+        #     print("is_gguf_weight\n")
+        #     print(is_gguf_weight)
+        #     print("is_gguf_weight_type\n")
+        #     print(is_gguf_weight_type)
+        #     print("output_dim\n")
+        #     print(output_dim)
+        #     print("needs_scalar_to_array\n")
+        #     print(needs_scalar_to_array)
+        #     print("self.output_sizes\n")
+        #     print(self.output_sizes)
+        #     print("self.tp_size\n")
+        #     print(self.tp_size)
+        #     print("packed_dim\n")
+        #     print(packed_dim)
+        #     print("use_bitsandbytes_4bit\n")
+        #     print(use_bitsandbytes_4bit)
+        #     print("is_sharded_weight\n")
+        #     print(is_sharded_weight)
+        #     print("self.tp_rank\n")
+        #     print(self.tp_rank)
+        #     print("loaded_weight.shape\n")
+        #     print(loaded_weight.shape)
 
     def _load_fused_module_from_checkpoint(self, param: BasevLLMParameter,
                                            loaded_weight: torch.Tensor):
@@ -1241,7 +1274,9 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        is_share: bool = False,
     ):
+        self.is_share = is_share
         # Divide the weight matrix along the first dimension.
         self.tp_rank = (get_tensor_model_parallel_rank()
                         if not disable_tp else 0)
@@ -1290,6 +1325,9 @@ class RowParallelLinear(LinearBase):
         self.update_param_tp_status()
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        # if self.is_share:
+        #     self.tp_rank = get_tensor_model_parallel_rank()
+        #     self.tp_size = get_tensor_model_parallel_world_size()
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
