@@ -296,7 +296,7 @@ class DeepseekV2MoE(nn.Module):
         #     is_m2n = self.afd_config.afd_connector == "m2nconnector"
         # else:
         #     is_m2n = False
-        is_m2n = False
+        is_m2n = True
         # TODO(yxj ):dynamic_scales --> dynamic_scale
         if is_m2n:
             fused_moe_out = self.experts.afd_m2n_ffn_compute(
@@ -826,12 +826,12 @@ class DeepseekV2DecoderLayer(nn.Module):
             topk_weights = topk_weights.to(torch.float)
             print(f'topk_weights after dtype is {topk_weights.dtype}')
             print(f'hidden_states shape dtype is {hidden_states.shape}')
-            is_m2n = False
+            is_m2n = True
             # if self.afd_config is not None:
             #     is_m2n = self.afd_config.afd_connector == "m2nconnector"
             # else:
             #     is_m2n = False
-            is_cam = True
+            is_cam = False
             if is_m2n:
                 m2n_afdconnector_data = M2NAFDConnectorMetadata() 
                 m2n_afdconnector_data.moe_expert_num = 64
