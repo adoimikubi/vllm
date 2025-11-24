@@ -612,7 +612,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        is_share: bool = False,
     ):
+        self.is_share = is_share
         self.output_sizes = output_sizes
         self.tp_size = (get_tensor_model_parallel_world_size()
                         if not disable_tp else 1)
@@ -1241,7 +1243,9 @@ class RowParallelLinear(LinearBase):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        is_share: bool = False,
     ):
+        self.is_share = is_share
         # Divide the weight matrix along the first dimension.
         self.tp_rank = (get_tensor_model_parallel_rank()
                         if not disable_tp else 0)
